@@ -115,7 +115,7 @@ class FoamMeasurementApp:
             time.sleep(0.1)  # Capture at 10 FPS
             
     def create_widgets(self):
-        # Main frame
+         # Main frame
         self.main_frame = ttk.Frame(self.window)
         self.main_frame.pack(padx=10, pady=10)
 
@@ -197,7 +197,12 @@ class FoamMeasurementApp:
         #Save Config button
         self.save_config_button = ttk.Button(self.control_frame, text="Save Configuration", command=self.save_config)
         self.save_config_button.pack(pady=5)
-
+    
+    def bind_roi_events(self):
+        self.canvas.bind("<ButtonPress-1>", self.start_roi)
+        self.canvas.bind("<B1-Motion>", self.draw_roi)
+        self.canvas.bind("<ButtonRelease-1>", self.end_roi)
+        
     def save_config(self):
         config = {
             "scale": self.scale,
@@ -228,64 +233,79 @@ class FoamMeasurementApp:
         self.calibration_start = None
         self.calibration_end = None
         self.calibrate_button.config(state="disabled")
-        self.calibration_info_label.config(text="Draw a line on the image corresponding to a known distance.")
+        self.calibration_info_label.config(text="Click two points to draw a calibration line.")
         self.canvas.bind("<ButtonPress-1>", self.calibration_start_point)
-        self.canvas.bind("<ButtonRelease-1>", self.calibration_end_point)
 
     def calibration_start_point(self, event):
         self.calibration_start = (event.x, event.y)
+        self.canvas.bind("<ButtonPress-1>", self.calibration_end_point)
+        self.calibration_info_label.config(text="Click the second point to complete the line.")
 
     def calibration_end_point(self, event):
         self.calibration_end = (event.x, event.y)
+        self.draw_calibration_line()
         self.calculate_scale()
-
+        
+    def draw_calibration_line(self):
+        if self.calibration_start and self.calibration_end:
+            self.canvas.create_line(self.calibration_start[0], self.calibration_start[1],
+                                self.calibration_end[0], self.calibration_end[1],
+                                fill="yellow", width=2, tags="calibration_line")
+    
+    def remove_calibration_line(self):
+        self.canvas.delete("calibration_line")
+        
     def calculate_scale(self):
         if self.calibration_start and self.calibration_end:
             pixel_distance = ((self.calibration_end[0] - self.calibration_start[0])**2 + 
                               (self.calibration_end[1] - self.calibration_start[1])**2)**0.5
             
             known_distance = simpledialog.askfloat("Input", "Enter the known distance in ml:", 
-                                                   parent=self.window)
-            
-            if known_distance:
-                self.scale = pixel_distance / known_distance
-                self.scale_entry.delete(0, tk.END)
-                self.scale_entry.insert(0, f"{self.scale:.4f}")
-                self.calibration_info_label.config(text=f"Scale set to {self.scale:.4f} pixels/ml")
-            else:
-                self.calibration_info_label.config(text="Calibration cancelled.")
-            
-            self.calibrating = False
-            self.calibrate_button.config(state="normal")
-            self.canvas.unbind("<ButtonPress-1>")
-            self.canvas.unbind("<ButtonRelease-1>")
+                                               parent=self.window)
+        
+        if known_distance:
+            self.scale = pixel_distance / known_distance
+            self.scale_entry.delete(0, tk.END)
+            self.scale_entry.insert(0, f"{self.scale:.4f}")
+            self.calibration_info_label.config(text=f"Scale set to {self.scale:.4f} pixels/ml")
+        else:
+            self.calibration_info_label.config(text="Calibration cancelled.")
+        
+        self.calibrating = False
+        self.calibrate_button.config(state="normal")
+        self.canvas.unbind("<ButtonPress-1>")
+        
+        # Remove the calibration line after a short delay
+        self.window.after(3000, self.remove_calibration_line)
             
     def start_roi(self, event):
-        if not self.tuning_mode:
-            self.roi = [event.x, event.y, 0, 0]
-            self.drawing_roi = True
+        self.roi = [event.x, event.y, 0, 0]
+        self.drawing_roi = True
 
     def draw_roi(self, event):
-        if not self.tuning_mode and self.drawing_roi:
+        if self.drawing_roi:
             self.roi[2] = event.x - self.roi[0]
             self.roi[3] = event.y - self.roi[1]
 
     def end_roi(self, event):
-        if not self.tuning_mode:
-            self.drawing_roi = False
-            self.roi[2] = max(event.x - self.roi[0], 1)
-            self.roi[3] = max(event.y - self.roi[1], 1)
-            self.roi_label.config(text=f"ROI: {self.roi}")
+        self.drawing_roi = False
+        self.roi[2] = max(event.x - self.roi[0], 1)
+        self.roi[3] = max(event.y - self.roi[1], 1)
+        self.roi_label.config(text=f"ROI: {self.roi}")
        
     def toggle_tuning_mode(self):
         self.tuning_mode = not self.tuning_mode
         if self.tuning_mode:
             self.tuning_button.config(text="Exit Tuning Mode")
             self.tuning_frame.grid(row=1, column=0, columnspan=2, padx=10, pady=10)
+            self.canvas.unbind("<ButtonPress-1>")
+            self.canvas.unbind("<B1-Motion>")
+            self.canvas.unbind("<ButtonRelease-1>")
             self.process_image()
         else:
             self.tuning_button.config(text="Enter Tuning Mode")
             self.tuning_frame.grid_forget()
+            self.bind_roi_events()  # Rebind ROI events when exiting tuning mode
 
     def apply_tuning(self):
         self.process_image()
@@ -346,33 +366,64 @@ class FoamMeasurementApp:
     def on_show_edges_change(self):
         if self.show_edges.get():
             self.process_image()
-    
+            
     def find_foam_edges(self, edge_image):
         h, w = edge_image.shape
         upper_edge = []
-        lower_edge = h - 1  # Start from the bottom
+        lower_edge = None  # This will be a single y-value
 
         # Define a step size for horizontal scanning (e.g., every 5 or 10 pixels)
         step = 10
 
+        # Find the lower edge first (liquid-foam interface)
+        for y in range(h - 1, -1, -1):
+            if np.any(edge_image[y, :]):
+                lower_edge = y
+                break
+
+        if lower_edge is None:
+            return None, None  # No foam detected
+
+        # Now find the upper edge
         for x in range(0, w, step):
-            col = edge_image[:, x]
+            col = edge_image[:lower_edge, x]  # Only search above the lower edge
             
             # Find upper edge (first non-zero pixel from top)
             upper = next((i for i, v in enumerate(col) if v != 0), None)
             if upper is not None:
                 upper_edge.append((x, upper))
-            
-            # Update lower edge if needed
-            lower = next((i for i in range(h-1, -1, -1) if col[i] != 0), None)
-            if lower is not None and lower < lower_edge:
-                lower_edge = lower
 
         # If no upper edge points were found, return None for both
         if not upper_edge:
             return None, None
 
-        return upper_edge, lower_edge
+        return upper_edge, lower_edge   
+#     def find_foam_edges(self, edge_image):
+#         h, w = edge_image.shape
+#         upper_edge = []
+#         lower_edge = h - 1  # Start from the bottom
+# 
+#         # Define a step size for horizontal scanning (e.g., every 5 or 10 pixels)
+#         step = 10
+# 
+#         for x in range(0, w, step):
+#             col = edge_image[:, x]
+#             
+#             # Find upper edge (first non-zero pixel from top)
+#             upper = next((i for i, v in enumerate(col) if v != 0), None)
+#             if upper is not None:
+#                 upper_edge.append((x, upper))
+#             
+#             # Update lower edge if needed
+#             lower = next((i for i in range(h-1, -1, -1) if col[i] != 0), None)
+#             if lower is not None and lower < lower_edge:
+#                 lower_edge = lower
+# 
+#         # If no upper edge points were found, return None for both
+#         if not upper_edge:
+#             return None, None
+# 
+#         return upper_edge, lower_edge
     
     def process_image(self):
         if self.image is None:
@@ -402,7 +453,6 @@ class FoamMeasurementApp:
             self.processed_image = None
             self.upper_edge, self.lower_edge = None, None
 
-
     def draw_irregular_edges(self, display_image, upper_edge, lower_edge):
         if display_image is None:
             return
@@ -413,33 +463,30 @@ class FoamMeasurementApp:
         for point in upper_edge:
             cv2.circle(display_image, (x + point[0], y + point[1]), 2, (0, 255, 0), -1)
 
-        # Draw lower edge
-        cv2.line(display_image, (x, y + lower_edge), (x + w, y + lower_edge), (0, 255, 0), 2)
-        
-#     def draw_edges(self, image):
-#         if image is None or self.upper_edge is None or self.lower_edge is None:
+        # Draw lower edge as a horizontal line
+        cv2.line(display_image, (x, y + lower_edge), (x + w, y + lower_edge), (0, 0, 255), 2)
+
+        # Optionally, draw a line connecting the upper edge points
+        if len(upper_edge) > 1:
+            upper_points = [(x + point[0], y + point[1]) for point in upper_edge]
+            cv2.polylines(display_image, [np.array(upper_points)], False, (0, 255, 0), 1)
+
+        # Draw vertical lines to show thickness at each measurement point
+        for point in upper_edge:
+            cv2.line(display_image, (x + point[0], y + point[1]), (x + point[0], y + lower_edge), (255, 0, 0), 1)
+#     def draw_irregular_edges(self, display_image, upper_edge, lower_edge):
+#         if display_image is None:
 #             return
 # 
-#         try:
-#             x, y, w, h = self.roi
+#         x, y, w, h = self.roi
 # 
-#             # Draw upper edge
-#             cv2.line(image, (x, y + self.upper_edge), (x + w, y + self.upper_edge), (0, 255, 0), 2)
-#             
-#             # Draw lower edge
-#             cv2.line(image, (x, y + self.lower_edge), (x + w, y + self.lower_edge), (0, 255, 0), 2)
-#             
-#             # Draw vertical line
-#             mid_x = x + w // 2
-#             cv2.line(image, (mid_x, y + self.upper_edge), (mid_x, y + self.lower_edge), (255, 0, 0), 2)
+#         # Draw upper edge points
+#         for point in upper_edge:
+#             cv2.circle(display_image, (x + point[0], y + point[1]), 2, (0, 255, 0), -1)
 # 
-#             # Draw text labels
-#             font = cv2.FONT_HERSHEY_SIMPLEX
-#             cv2.putText(image, "Upper", (x, y + self.upper_edge - 10), font, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
-#             cv2.putText(image, "Lower", (x, y + self.lower_edge + 20), font, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
-# 
-#         except Exception as e:
-#             print(f"Error drawing edges: {e}")
+#         # Draw lower edge
+#         cv2.line(display_image, (x, y + lower_edge), (x + w, y + lower_edge), (0, 255, 0), 2)
+        
         
     def update_history_table(self):
         if self.history_table:
@@ -453,7 +500,7 @@ class FoamMeasurementApp:
         self.history_table.pack(pady=10)
 
         for timestamp, thickness in reversed(self.measurement_history):
-            self.history_table.insert('', 'end', values=(timestamp, f"{thickness:.2f}"))
+            self.history_table.insert('', 'end', values=(timestamp, f"{thickness}"))
             
     def update_measurement_history(self, foam_height):
             timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -461,7 +508,6 @@ class FoamMeasurementApp:
             if len(self.measurement_history) > 3:
                 self.measurement_history.pop(0)
             self.update_history_table()
-    
     def measure_foam(self):
         self.process_image()
 
@@ -478,22 +524,58 @@ class FoamMeasurementApp:
         upper_edge, lower_edge = self.find_foam_edges(self.processed_image)
         
         if upper_edge is None or lower_edge is None:
-            self.result_label.config(text="No foam detected")
+            self.result_label.config(text="No valid foam edges detected")
             return
 
         # Calculate average thickness
         thicknesses = [lower_edge - upper[1] for upper in upper_edge]
+        if not thicknesses:
+            self.result_label.config(text="No valid foam thickness measurements")
+            return
+
         avg_thickness_px = sum(thicknesses) / len(thicknesses)
         
         foam_height = avg_thickness_px / self.scale
-        result_text = f"Avg. Foam thickness: {foam_height:.2f} ml"
+        result_text = f"Avg. Foam thickness: {round(foam_height)} ml"
         self.result_label.config(text=result_text)
 
         # Update measurement history
-        self.update_measurement_history(foam_height)
+        self.update_measurement_history(round(foam_height))
 
-        # Visualization (if needed)
+        # Visualization
         self.draw_irregular_edges(self.image.copy(), upper_edge, lower_edge)
+#     def measure_foam(self):
+#         self.process_image()
+# 
+#         if self.processed_image is None:
+#             self.result_label.config(text="No foam detected")
+#             return
+# 
+#         try:
+#             self.scale = float(self.scale_entry.get())
+#         except ValueError:
+#             self.result_label.config(text="Invalid scale value")
+#             return
+# 
+#         upper_edge, lower_edge = self.find_foam_edges(self.processed_image)
+#         
+#         if upper_edge is None or lower_edge is None:
+#             self.result_label.config(text="No foam detected")
+#             return
+# 
+#         # Calculate average thickness
+#         thicknesses = [lower_edge - upper[1] for upper in upper_edge]
+#         avg_thickness_px = sum(thicknesses) / len(thicknesses)
+#         
+#         foam_height = avg_thickness_px / self.scale
+#         result_text = f"Avg. Foam thickness: {round(foam_height)} ml"
+#         self.result_label.config(text=result_text)
+# 
+#         # Update measurement history
+#         self.update_measurement_history(round(foam_height))
+# 
+#         # Visualization (if needed)
+#         self.draw_irregular_edges(self.image.copy(), upper_edge, lower_edge)
     
         
         
