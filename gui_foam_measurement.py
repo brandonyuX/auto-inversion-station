@@ -6,6 +6,7 @@ from tkinter import ttk, simpledialog, messagebox
 from PIL import Image, ImageTk
 from picamera2 import Picamera2
 import paho.mqtt.client as mqtt
+from paho.mqtt.client import ConnectFlags, ReasonCodes
 import time
 import json
 
@@ -28,7 +29,7 @@ class FoamMeasurementApp:
         self.processing_thread.start()
         
         # MQTT setup
-        self.mqtt_client = mqtt.Client()
+        self.mqtt_client = mqtt.Client(protocol=mqtt.MQTTv311)
         self.mqtt_client.on_connect = self.on_mqtt_connect
         self.mqtt_client.on_message = self.on_mqtt_message
         self.mqtt_client.connect("localhost", 1884, 60)
@@ -60,7 +61,8 @@ class FoamMeasurementApp:
         self.window.protocol("WM_DELETE_WINDOW", self.on_closing)
     
     
-    def on_mqtt_connect(self, client, userdata, flags, rc):
+    def on_mqtt_connect(self, client, userdata, flags, rc, properties=None):
+        rc_int = rc if isinstance(rc, int) else rc.value
         result_meanings = {
             0: "Connection successful",
             1: "Connection refused - incorrect protocol version",
@@ -70,14 +72,14 @@ class FoamMeasurementApp:
             5: "Connection refused - not authorized"
         }
         
-        if rc in result_meanings:
-            result_message = result_meanings[rc]
+        if rc_int in result_meanings:
+            result_message = result_meanings[rc_int]
         else:
-            result_message = f"Unknown result code: {rc}"
+            result_message = f"Unknown result code: {rc_int}"
         
         print(f"MQTT Connection result: {result_message}")
         
-        if rc == 0:
+        if rc_int == 0:
             print("Successfully connected to MQTT broker")
             self.mqtt_client.subscribe("trigger_cam")
         else:
@@ -398,32 +400,7 @@ class FoamMeasurementApp:
             return None, None
 
         return upper_edge, lower_edge   
-#     def find_foam_edges(self, edge_image):
-#         h, w = edge_image.shape
-#         upper_edge = []
-#         lower_edge = h - 1  # Start from the bottom
-# 
-#         # Define a step size for horizontal scanning (e.g., every 5 or 10 pixels)
-#         step = 10
-# 
-#         for x in range(0, w, step):
-#             col = edge_image[:, x]
-#             
-#             # Find upper edge (first non-zero pixel from top)
-#             upper = next((i for i, v in enumerate(col) if v != 0), None)
-#             if upper is not None:
-#                 upper_edge.append((x, upper))
-#             
-#             # Update lower edge if needed
-#             lower = next((i for i in range(h-1, -1, -1) if col[i] != 0), None)
-#             if lower is not None and lower < lower_edge:
-#                 lower_edge = lower
-# 
-#         # If no upper edge points were found, return None for both
-#         if not upper_edge:
-#             return None, None
-# 
-#         return upper_edge, lower_edge
+
     
     def process_image(self):
         if self.image is None:
