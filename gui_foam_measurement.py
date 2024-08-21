@@ -39,6 +39,7 @@ class FoamMeasurementApp:
         self.processed_image = None
         self.scale = 1.0  # pixels per ml
         self.show_edges = tk.BooleanVar(value=False)
+        self.calibrating = False
         self.roi = [0, 0, 640, 480]  # [x, y, w, h]
         self.drawing_roi = False
         self.upper_edge = None
@@ -148,6 +149,15 @@ class FoamMeasurementApp:
         self.scale_entry.insert(0, "1.0")
         self.scale_entry.pack(side=tk.LEFT)
 
+        # Calibration section
+        self.calibration_label = ttk.Label(scale_frame, text="Calibrate:")
+        self.calibration_label.pack(side=tk.LEFT, padx=10)
+        self.calibrate_button = ttk.Button(scale_frame, text="Start Calibration", command=self.start_calibration)
+        self.calibrate_button.pack(side=tk.LEFT)
+
+        self.calibration_info_label = ttk.Label(self.control_frame, text="")
+        self.calibration_info_label.pack(pady=5)
+        
         # Measure button
         self.measure_button = ttk.Button(self.control_frame, text="Measure Foam", command=self.measure_foam)
         self.measure_button.pack(pady=5)
@@ -165,15 +175,7 @@ class FoamMeasurementApp:
 
         # Tuning frame (initially hidden)
         self.tuning_frame = ttk.Frame(self.main_frame)
-        # Calibration section in tuning frame
-        self.calibration_label = ttk.Label(self.tuning_frame, text="Scale Calibration:")
-        self.calibration_label.pack(pady=(10,0))
-        
-        self.calibrate_button = ttk.Button(self.tuning_frame, text="Start Calibration", command=self.start_calibration)
-        self.calibrate_button.pack(pady=5)
-        
-        self.calibration_info_label = ttk.Label(self.tuning_frame, text="")
-        self.calibration_info_label.pack(pady=5)
+       
         # Update the threshold slider label
         self.threshold_label = ttk.Label(self.tuning_frame, text="Edge Detection Sensitivity:")
         self.threshold_label.pack()
@@ -240,23 +242,32 @@ class FoamMeasurementApp:
 
     def calibration_start_point(self, event):
         self.calibration_start = (event.x, event.y)
-        self.canvas.bind("<ButtonPress-1>", self.calibration_end_point)
+        self.canvas.bind("<ButtonRelease-1>", self.calibration_end_point)
         self.calibration_info_label.config(text="Click the second point to complete the line.")
 
     def calibration_end_point(self, event):
         self.calibration_end = (event.x, event.y)
         self.draw_calibration_line()
         self.calculate_scale()
-        
+        self.calibrating = False
+        self.calibrate_button.config(state="normal")
+        self.canvas.unbind("<ButtonPress-1>")
+        self.canvas.unbind("<ButtonRelease-1>")
+        self.bind_roi_events()  # Rebind ROI events after calibration
+
     def draw_calibration_line(self):
         if self.calibration_start and self.calibration_end:
-            self.canvas.create_line(self.calibration_start[0], self.calibration_start[1],
-                                self.calibration_end[0], self.calibration_end[1],
-                                fill="yellow", width=2, tags="calibration_line")
-    
-    def remove_calibration_line(self):
-        self.canvas.delete("calibration_line")
-        
+            self.canvas.delete("calibration_line")
+            self.canvas.create_line(
+                self.calibration_start[0], self.calibration_start[1],
+                self.calibration_end[0], self.calibration_end[1],
+                fill="yellow", width=2, tags="calibration_line"
+            )
+            self.calibration_info_label.config(text="Calibration line drawn. Enter the known distance.")
+            self.window.after(3000, self.remove_calibration_line)
+        else:
+            self.calibration_info_label.config(text="Please click two points to draw the calibration line.")
+                
     def calculate_scale(self):
         if self.calibration_start and self.calibration_end:
             pixel_distance = ((self.calibration_end[0] - self.calibration_start[0])**2 + 
@@ -264,22 +275,20 @@ class FoamMeasurementApp:
             
             known_distance = simpledialog.askfloat("Input", "Enter the known distance in ml:", 
                                                parent=self.window)
-        
-        if known_distance:
-            self.scale = pixel_distance / known_distance
-            self.scale_entry.delete(0, tk.END)
-            self.scale_entry.insert(0, f"{self.scale:.4f}")
-            self.calibration_info_label.config(text=f"Scale set to {self.scale:.4f} pixels/ml")
-        else:
-            self.calibration_info_label.config(text="Calibration cancelled.")
-        
-        self.calibrating = False
-        self.calibrate_button.config(state="normal")
-        self.canvas.unbind("<ButtonPress-1>")
-        
-        # Remove the calibration line after a short delay
-        self.window.after(3000, self.remove_calibration_line)
             
+            if known_distance is not None and known_distance > 0:
+                self.scale = pixel_distance / known_distance
+                self.scale_entry.delete(0, tk.END)
+                self.scale_entry.insert(0, f"{self.scale:.4f}")
+                self.calibration_info_label.config(text=f"Scale set to {self.scale:.4f} pixels/ml")
+            else:
+                self.calibration_info_label.config(text="Invalid or cancelled distance input.")
+        else:
+            self.calibration_info_label.config(text="No calibration line drawn.")
+   
+    def remove_calibration_line(self):
+        self.canvas.delete("calibration_line")
+        
     def start_roi(self, event):
         self.roi = [event.x, event.y, 0, 0]
         self.drawing_roi = True
@@ -290,10 +299,11 @@ class FoamMeasurementApp:
             self.roi[3] = event.y - self.roi[1]
 
     def end_roi(self, event):
-        self.drawing_roi = False
-        self.roi[2] = max(event.x - self.roi[0], 1)
-        self.roi[3] = max(event.y - self.roi[1], 1)
-        self.roi_label.config(text=f"ROI: {self.roi}")
+        if not self.calibrating:
+            self.drawing_roi = False
+            self.roi[2] = max(event.x - self.roi[0], 1)
+            self.roi[3] = max(event.y - self.roi[1], 1)
+            self.roi_label.config(text=f"ROI: {self.roi}")
        
     def toggle_tuning_mode(self):
         self.tuning_mode = not self.tuning_mode
